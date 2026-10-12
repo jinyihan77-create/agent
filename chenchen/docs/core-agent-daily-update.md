@@ -2,6 +2,21 @@
 
 > 用途：每天 22:00 前更新一次，供团队同步主链路进展。本文档只记录 Core Agent 主链路，不替代 Risk、Memory、Quant 或 UI 的专项日报。
 
+## 2026-10-12
+
+### 本轮继续实现
+
+- 新增 `assertHealthCheckResponseSemantics`，在真实响应和 Risk Workbench Adapter 输出前检查跨对象追踪键、审计归属、checkpoint 引用、ToolResult `trace_id` 和 Risk Handoff 证据引用。
+- 强制保留 `risk_handoff.execution_allowed = false`；非 `HANDOFF_REQUIRED` 状态不得生成 Handoff；候选方案、市场上下文、模拟结果和审计 ID 不得指向其他任务或旧结果。
+- 增加断裂 checkpoint 引用和篡改执行授权的回归测试；主项目测试由 53 项增至 54 项，全部通过。
+
+### 验证结果
+
+- `npm run check`：通过。
+- `npm test`：54/54 通过。
+- 既有响应示例继续通过基础 Schema 校验；运行时响应额外通过语义校验。
+- Risk Owner 正式接收/回写 Contract、持久化恢复和生产级分布式限流仍需外部协议或基础设施，未在本轮臆造。
+
 ## 2026-10-11
 
 ### 22:00 自动化收尾核验（本轮新增记录）
@@ -39,6 +54,15 @@
 **主链路阶段 / 今日结论**：请求 → 公网 Backend → Session/Context → Harness → 现有 Tools/Quant → investment-agent.v1 响应 → Risk Handoff 已可复现；仍停在 HANDOFF_REQUIRED/PENDING_REVIEW，未证明独立 Risk 审核闭环。Core Agent 只调用现有 Quant 结果，未重新计算；未修改 Memory consent、范围、生命周期或清理规则；已经过 Risk 停止边界，execution_allowed=false。request_id、task_id、session_id、Contract version 和 audit_evidence 在成功回放中可追踪，失败和跨请求归因仍有限。
 
 **下一步**：Risk Owner 提供正式接收/回写 Contract；Backend Owner 补齐认证、限流、脱敏和失败事件归因；UI 按统一字段验收等待/错误状态。日报与 DOCX 作为两仓库获准文档产出提交，不修改业务实现来让测试通过。
+
+### 本轮继续实现
+
+- Backend 失败路径已补齐统一 `ErrorTrace`：Contract 错误响应可携带 `request_id`、`task_id`、`session_id`、`audit_id`；尚未创建任务的 Schema 错误保留空值。
+- Harness 在任务执行前绑定当前 `request_id`，审计事件 payload 逐条记录对应请求号；工具失败后可用错误 trace 读取 `/api/audit/{task_id}`，并保留原有重试与熔断规则。
+- Node Backend 与 Cloudflare Worker 共用错误构造和详情脱敏逻辑；Worker 增加可选 `CORE_AGENT_API_KEY`、每客户端 IP 每分钟 60 次 best-effort 限流，以及 401/429 Contract 错误返回。
+- 新增失败任务 HTTP/Contract 回归覆盖，主项目测试由 52 项增至 53 项，全部通过。
+
+这部分代码已在本地验证；Cloudflare 公网实例需重新部署后才会获得新的认证、限流和错误响应行为。Risk 正式接收/回写 Contract、持久化恢复和生产级分布式限流仍待对应 Owner 提供协议或基础设施。
 
 
 ### 今日结论
@@ -387,3 +411,53 @@ Core Agent 已完成架构图、模块调用时序和统一 Contract 的第一�
 - 
 ```
 
+
+## 2026-10-12
+
+### 今日结论
+
+主链路完成一次可验证的 Contract 语义校验与失败追踪增强：个人仓库工作区新增跨对象引用、Risk evidence、execution_allowed 和 ErrorTrace 检查；团队仓库今日无业务代码变更。两边均通过现有检查，主链路仍停在 Risk Handoff / PENDING_REVIEW，不能宣称独立 Risk 审核闭环完成。
+
+### 今日真实产出
+
+- 今日无团队仓库业务代码变更；个人仓库存在未提交的 Core Agent 工作区改动，已作为只读证据检查，未由本日报代提交。
+- 统一 Contract：`investment-agent.v1` 增加 ErrorTrace 可选结构，错误可保留 contract_version、request_id、task_id、session_id、audit_id；跨对象语义检查覆盖 trace/TaskState/AuditEvidence 追踪键、checkpoint.completed→ToolResult、result_refs→trace_id、Risk evidence→artifacts，以及 `execution_allowed=false`。
+- Harness / Backend：工具失败先绑定 request_id 到 TaskState，失败信封可携带 task/session/audit trace；审计事件保留各次 request_id。公网 Worker 文档补充 API key、best-effort 限流和错误详情脱敏边界。
+- 维护资料：架构图 `docs/core-agent-architecture.md`、时序图 `docs/core-agent-sequence.md`、统一 Contract `contracts/investment-agent.v1.schema.json` 与 `contracts/README.md` 继续作为联调源文件；本次未改 Quant 逻辑、Memory consent/范围/生命周期/清理规则或 Risk 实现。
+
+### A. 已完成的核心接口
+
+| 接口 / Contract | 版本 | 生产方 | 消费方 | 当前字段状态 | 证据 |
+| --- | --- | --- | --- | --- | --- |
+| Agent request/response | `investment-agent.v1` | Backend / Core Agent | Harness / UI / Risk bridge | 已验证 request/task/session、task_state、artifacts、tool_results、audit_evidence、risk_handoff；跨对象语义检查已在个人工作区实现 | `contracts/investment-agent.v1.schema.json`, `contracts/investment-contract.js` |
+| Error envelope | `investment-agent.v1` | Backend | Caller / UI | `code/message/retryable/stage/recovery` 必填；`trace` 可带五个追踪键；Schema 失败前 task/session/audit 可为空 | `contracts/README.md`, `investment-contract.js` |
+| Risk Handoff | `investment-agent.v1` / `risk-workbench.bridge@0.1.0` | Core Agent / Adapter | Risk / UI / 人工复核 | `PENDING_REVIEW`、`decision=REQUIRED`、`execution_allowed=false` 固定；独立 Risk Consumer 与回写仍待确认 | `integrations/risk-workbench-adapter.js`, `docs/risk-workbench-integration.md` |
+| 公网 Backend | `core-agent-to-risk-workbench.demo@0.1.0` | Cloudflare Worker | UI / Risk bridge | API key、限流、脱敏已文档化为演示级边界，生产认证与跨实例限流未完成 | `cloudflare/worker.js`, `docs/public-backend-deployment.md` |
+
+### B. 可验证的集成进度
+
+- 团队仓库：在 `chenchen/` 执行 `npm run check`，通过；执行 `npm test`，52/52 通过；执行 `git diff --check`，通过。
+- 个人仓库工作区：在 `chenchen/` 执行 `npm run check`，通过；执行 `npm test`，54/54 通过，其中包含 response semantics、failed task trace、Risk read-only 等新增覆盖；执行 `git diff --check`，通过。
+- 字段追踪结果：个人新增用例验证失败任务错误携带 `task_id/session_id/audit_id`，语义检查拒绝断裂引用和伪造授权；成功路径仍保留现有 Quant metrics、candidate target_weights、simulation comparisons，不重新计算 Quant。
+- 本次未重新运行公网 HTTP Smoke；昨日日报已记录 `/health`、`/`、`/api/risk-workbench/handoff` 返回 200。今日结果不扩展为新的线上部署结论。
+
+### C. 需要其他 Owner 配合的阻塞项
+
+1. **Risk Owner**：确认独立 Risk Consumer 的接收 Schema、`review_status/rejection_reason/decision` 回写、`audit_id` 消费与失败重试语义；当前只到 Handoff/只读预览边界。
+2. **Backend Owner**：确认非 Contract 路由 404/503 的统一 ErrorTrace、生产认证、持久化审计和跨请求顶层读取语义；当前文档已标出演示级限流与脱敏限制。
+3. **UI Owner**：确认 pending review、失败 trace、retry/recovery 和 `execution_allowed=false` 的展示与交互字段。
+4. **Memory / Quant / Data Owner**：确认 audit_evidence 不进入 Memory 长期规则；确认 Quant 版本兼容与市场上下文来源、时效、冲突复核协议。市场价格与新闻方向冲突继续只记录 `REVIEW_REQUIRED`，不生成交易动作。
+
+### 主链路与安全边界
+
+- 当前阶段：请求进入 → Contract 校验 → Session/Context → Harness → Tools/既有 Quant → Audit Evidence → Risk Handoff → 等待 Risk 审核；停止点仍为 `PENDING_REVIEW`。
+- Quant：只消费现有 metrics、target_weights、simulation comparisons；未新增收益、回撤、相关性或模拟计算。
+- Memory：未改 consent、范围、生命周期、清理或持久化规则；本次只检查 audit/session 边界。
+- Risk：已经过 Handoff 边界；前端 approval 不视为交易授权，`execution_allowed` 固定为 `false`。
+- 可追踪性：Contract version、request_id、task_id、session_id、audit_evidence 在成功路径和个人工作区失败路径可关联；长期持久化和独立 Risk 回写仍未完成。
+
+### 下一步
+
+- Risk Owner 冻结独立 Consumer 与回写 Contract 后，补充可复现接收/拒绝/重试测试。
+- Backend Owner 决定统一错误追踪与持久化审计版本，避免把演示级 Worker 保护当成生产安全闭环。
+- UI Owner 对齐 pending/error/recovery 字段；Data Owner 提供可审计的真实市场数据协议后，再替换固定夹具。
