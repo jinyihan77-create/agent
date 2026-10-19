@@ -1,0 +1,21 @@
+{
+  "checked_at": "2026-10-19T14:09:39.321426+00:00",
+  "baseline_main": "24a925eb8bb49b7b64e099d31a3e1fb31525efa2",
+  "npm_check_exit": 0,
+  "npm_tests": {
+    "passed": 258,
+    "failed": 0,
+    "skipped": 0
+  },
+  "full_schema_positive_cases": 7,
+  "trace_checks_passed": 32,
+  "golden_steps": 12,
+  "golden_status": "PASS",
+  "external_model_calls": 0,
+  "formal_risk_called": false,
+  "real_execution_called": false,
+  "docx_zip_text_media_width": "PASS; two embedded images each",
+  "diagram_source_visual_inspection": "PASS",
+  "docx_page_layout": "NOT_COMPLETED: canonical renderer missing bundled LibreOffice soffice.exe",
+  "scope": "Docs-only closeout. Preserves collaborator benchmark artifacts. Full schema validates new synthetic health and retained October 17 model record; new golden uses local replacements only."
+}
