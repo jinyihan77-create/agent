@@ -13,7 +13,8 @@
   "balance_verified": false,
   "suggested_staging_total_cny": 1,
   "suggested_staging_daily_cny": 0.5,
-  "paid_test_approval": "PENDING",
+  "paid_test_approval": "DECLINED_LOCAL_ONLY",
+  "user_decision": "Temporarily no paid testing; complete local verification only.",
   "tests": {
     "handoff": {
       "total": 95,
