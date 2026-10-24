@@ -56,7 +56,7 @@ export function providerSlot(env, slot) {
   }
   if (provider === 'openai' && (url.origin !== 'https://api.openai.com' || url.pathname.replace(/\/$/, '') !== '/v1')) throw new ProviderError('MODEL_BASE_URL_INVALID');
   if (provider === 'deepseek' && (url.origin !== 'https://api.deepseek.com' || !['', '/', '/v1', '/v1/'].includes(url.pathname))) throw new ProviderError('MODEL_BASE_URL_INVALID');
-  if (provider !== 'xai' && env[`LLM_${slot}_PROTOCOL_VERIFIED`] !== 'true') {
+  if (env[`LLM_${slot}_PROTOCOL_VERIFIED`] !== 'true') {
     throw new ProviderError('MODEL_PROTOCOL_UNVERIFIED');
   }
   if (env[`LLM_${slot}_JSON_VERIFIED`] !== 'true' || env[`LLM_${slot}_STREAM_VERIFIED`] !== 'true') {
@@ -123,9 +123,14 @@ async function readStream(response, onDelta, signal) {
     if (finishReason && finishReason !== 'stop') throw new ProviderError('MODEL_INCOMPLETE_RESPONSE', {partial});
     return {text, usage, provider_response_id: responseId, reported_model: reportedModel, finish_reason: finishReason};
   } catch (error) {
-    if (error instanceof ProviderError) throw error;
+    if (error instanceof ProviderError) throw new ProviderError(error.code, {status: error.status, partial: partial || error.partial});
     throw new ProviderError(signal.aborted ? 'MODEL_TIMEOUT' : 'MODEL_STREAM_INTERRUPTED', {partial});
-  } finally { try { await reader.cancel(); } catch {} reader.releaseLock(); }
+  } finally {
+    // Cleanup must not extend the response deadline if the upstream never
+    // acknowledges cancellation. Cancel synchronously, then release the lock.
+    try { reader.cancel().catch(() => {}); } catch {}
+    reader.releaseLock();
+  }
 }
 
 export async function callProvider(config, messages, {stream = false, phase, onDelta = () => {}, fetchImpl = fetch, connectTimeoutMs = config.connectTimeoutMs || 8000, responseTimeoutMs = config.responseTimeoutMs || 45000, requestId, signal} = {}) {
@@ -143,7 +148,7 @@ export async function callProvider(config, messages, {stream = false, phase, onD
   try {
     let response;
     try {
-      response = await abortable(fetchImpl(config.url, {method: 'POST', signal: controller.signal,
+      response = await abortable(fetchImpl(config.url, {method: 'POST', redirect: 'manual', signal: controller.signal,
         headers: {'Authorization': `Bearer ${config.key}`, 'Content-Type': 'application/json', 'X-Client-Request-Id': requestId || crypto.randomUUID()},
         body: JSON.stringify({model: config.model, messages, stream, max_tokens: config.maxOutputTokens || MAX_OUTPUT,
           ...(config.temperature === null ? {} : {temperature: config.temperature ?? 0}),
@@ -154,6 +159,7 @@ export async function callProvider(config, messages, {stream = false, phase, onD
     }
     clearTimeout(timer);
     timer = setTimeout(() => controller.abort(), responseTimeoutMs);
+    if (response.status >= 300 && response.status < 400) throw new ProviderError('MODEL_REDIRECT_REJECTED', {status: response.status});
     if (!response.ok) {
       let code = null;
       try { const error = await abortable(response.json(), controller.signal); code = error?.error?.code || error?.error?.type || error?.code || null; } catch {}

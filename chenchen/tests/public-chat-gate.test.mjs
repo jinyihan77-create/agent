@@ -100,7 +100,10 @@ test('bounded reservations remain atomic across concurrent users and original-da
 });
 
 test('missing or anomalous usage never refunds a dynamic reservation as precise cost', async () => {
-  for (const usage of [null, {prompt_tokens: 2_001, completion_tokens: 1}, {prompt_tokens: 100, completion_tokens: 1_025}]) {
+  for (const usage of [null, {prompt_tokens: 2_001, completion_tokens: 1}, {prompt_tokens: 100, completion_tokens: 1_025},
+    {prompt_tokens: 100, completion_tokens: 20, total_tokens: 1000},
+    {prompt_tokens: 100, completion_tokens: 20, input_tokens: 200},
+    {prompt_tokens: 100, completion_tokens: 20, output_tokens: 200}]) {
     const f = fixture(), {lease} = await f.begin();
     const held = await f.reserve(lease, 'uncertain', 'plan', {input_bound_tokens: 2_000});
     const result = await f.send('receipt', complete(lease, 'uncertain', {usage}));
@@ -109,6 +112,18 @@ test('missing or anomalous usage never refunds a dynamic reservation as precise 
     assert.equal(recent.usage_estimate_verified, false);
     assert.equal(recent.cost_basis, 'CONSERVATIVE_RESERVATION_NOT_INVOICE');
   }
+});
+
+test('consistent usage totals and aliases allow one verified settlement, never a second refund', async () => {
+  const f = fixture(), {lease} = await f.begin();
+  await f.reserve(lease, 'consistent', 'plan', {input_bound_tokens: 2000});
+  const body = complete(lease, 'consistent', {usage: {prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100, input_tokens: 1000, output_tokens: 100}});
+  assert.equal((await f.send('receipt', body)).charged_micro_cny, 5183);
+  assert.equal((await f.send('receipt', body)).duplicate, true);
+  const status = await f.send('status');
+  assert.equal(status.used_micro_cny, 5183);
+  assert.equal(status.receipt_count, 1);
+  assert.equal(status.recent_receipts[0].usage_estimate_verified, true);
 });
 
 test('identical request is charged once and cannot authorize a second provider call', async () => {

@@ -51,6 +51,14 @@ test('external routing requires approval, verified capabilities, official hosts 
   assert.ok(gatewayPolicy({...higherPrices, LLM_A_MAX_MESSAGE_CHARS: '6500', LLM_B_MAX_MESSAGE_CHARS: '6500'}).max_micro_cny <= 100_000);
 });
 
+test('hybrid policy exposes a finite conservative quote including the Workers AI attempt', () => {
+  const policy = gatewayPolicy({...base, LLM_GATEWAY_MODE: 'hybrid'});
+  assert.equal(Number.isSafeInteger(policy.max_micro_cny), true);
+  assert.ok(policy.max_micro_cny > 0);
+  assert.ok(policy.max_micro_cny >= reservationForInput(policy, 2000, 'A').micro);
+  assert.notEqual(JSON.parse(JSON.stringify(policy)).max_micro_cny, null);
+});
+
 test('quota 429 falls back once within one reservation; admin stats distinguish calls, attempts, usage and conservative cost', async () => {
   const f = fixture(), lease = await f.begin(), calls = [], events = [];
   const model = createModelGateway(f.env, lease, {fetchImpl: async (url, request) => {

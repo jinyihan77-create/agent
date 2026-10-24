@@ -6,7 +6,7 @@ const env = {
   LLM_PRIMARY: 'A',
   LLM_A_PROVIDER: 'xai', LLM_A_PROTOCOL: 'chat-completions',
   LLM_A_BASE_URL: 'https://api.x.ai/v1', LLM_A_MODEL: 'test-model-a', LLM_A_API_KEY: 'test-only',
-  LLM_A_JSON_VERIFIED: 'true', LLM_A_STREAM_VERIFIED: 'true',
+  LLM_A_PROTOCOL_VERIFIED: 'true', LLM_A_JSON_VERIFIED: 'true', LLM_A_STREAM_VERIFIED: 'true',
   LLM_B_PROVIDER: 'synthetic', LLM_B_PROTOCOL: 'chat-completions',
   LLM_B_BASE_URL: 'https://model-b.example/v1', LLM_B_MODEL: 'test-model-b', LLM_B_API_KEY: 'test-only',
   LLM_B_PROTOCOL_VERIFIED: 'true', LLM_B_JSON_VERIFIED: 'true', LLM_B_STREAM_VERIFIED: 'true',
@@ -18,6 +18,7 @@ test('provider config rejects absent verification and unsafe URLs', () => {
   assert.equal(providerSlot(env, 'A').url.href, 'https://api.x.ai/v1/chat/completions');
   assert.throws(() => providerSlot({...env, LLM_A_BASE_URL: 'http://127.0.0.1:3000/v1'}, 'A'), {code: 'MODEL_BASE_URL_INVALID'});
   assert.throws(() => providerSlot({...env, LLM_B_PROTOCOL_VERIFIED: 'false'}, 'B'), {code: 'MODEL_PROTOCOL_UNVERIFIED'});
+  assert.throws(() => providerSlot({...env, LLM_A_PROTOCOL_VERIFIED: 'false'}, 'A'), {code: 'MODEL_PROTOCOL_UNVERIFIED'});
   assert.throws(() => providerSlot({...env, LLM_A_JSON_VERIFIED: 'false'}, 'A'), {code: 'MODEL_CAPABILITY_UNVERIFIED'});
 });
 
@@ -110,4 +111,55 @@ test('verified per-model JSON mode and temperature settings shape only the serve
     assert.equal('temperature' in body, false);
     return json('configured-response', '{"operation":"explain"}');
   }});
+});
+
+test('a timeout after the first stream delta stops without a retry or fallback', async () => {
+  let calls = 0;
+  const deltas = [];
+  const attempts = [];
+  await assert.rejects(routeProviders({...env, LLM_A_MODEL: 'partial-timeout-a', LLM_B_MODEL: 'partial-timeout-b'}, messages, {
+    stream: true, responseTimeoutMs: 20, onDelta: delta => deltas.push(delta), onAttempt: item => attempts.push(item),
+    fetchImpl: async () => {
+      calls++;
+      return new Response(new ReadableStream({start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"id":"partial-timeout","choices":[{"delta":{"content":"正在核对"}}]}\n\n'));
+        if (calls > 1) {
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          controller.close();
+        }
+      }}));
+    },
+  }), {code: 'MODEL_PARTIAL_RESPONSE', partial: true});
+  assert.equal(calls, 1);
+  assert.deepEqual(deltas, ['正在核对']);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0].error_code, 'MODEL_TIMEOUT');
+});
+
+test('provider redirects are rejected without contacting a backup', async () => {
+  let calls = 0;
+  await assert.rejects(routeProviders({...env, LLM_A_MODEL: 'redirect-rejected-a'}, messages, {fetchImpl: async (_url, request) => {
+    calls++;
+    assert.equal(request.redirect, 'manual', 'credentials and financial context must stay at the configured URL');
+    return new Response(null, {status: 307, headers: {Location: 'https://unapproved.example/v1/chat/completions'}});
+  }}), {code: 'MODEL_REDIRECT_REJECTED', status: 307});
+  assert.equal(calls, 1);
+});
+
+test('an upstream that never acknowledges stream cancellation cannot hold the timeout open', async () => {
+  let cancelled = false;
+  let deadline;
+  const stuck = new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"部分"}}]}\n\n')); },
+    cancel() { cancelled = true; return new Promise(() => {}); },
+  });
+  try {
+    await assert.rejects(Promise.race([
+      callProvider(providerSlot({...env, LLM_A_MODEL: 'cancel-deadline-a'}, 'A'), messages, {
+        stream: true, responseTimeoutMs: 20, fetchImpl: async () => new Response(stuck),
+      }),
+      new Promise((_, reject) => { deadline = setTimeout(() => reject(Error('cleanup exceeded deadline')), 500); }),
+    ]), {code: 'MODEL_TIMEOUT', partial: true});
+    assert.equal(cancelled, true);
+  } finally { clearTimeout(deadline); }
 });

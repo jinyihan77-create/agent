@@ -67,9 +67,10 @@ export function gatewayPolicy(env) {
   if (new Set(slots.map(slot => `${slot.provider}:${slot.model}`)).size !== slots.length) throw invalid();
   if (hybrid && slots.length < 2) throw invalid();
   // Hybrid allows one Workers AI attempt and at most one external backup.
-  const possibleCosts = slots.map(slot => slot.max_micro_cny * slot.max_attempts);
+  const maximumSlotCost = slot => slot.max_micro_cny ?? estimatedMicroCny({prompt_tokens: slot.max_input_tokens, completion_tokens: slot.max_output_tokens}, slot.prices);
+  const possibleCosts = slots.map(slot => maximumSlotCost(slot) * slot.max_attempts);
   if (!hybrid && slots.length === 2) possibleCosts.push(slots[0].max_micro_cny + slots[1].max_micro_cny);
-  if (hybrid) for (const slot of slots.slice(1)) possibleCosts.push(slots[0].max_micro_cny + slot.max_micro_cny);
+  if (hybrid) for (const slot of slots.slice(1)) possibleCosts.push(maximumSlotCost(slots[0]) + maximumSlotCost(slot));
   const max_micro_cny = Math.max(...possibleCosts);
   if (!hybrid && max_micro_cny > CALL_RESERVATION_MICRO_CNY) throw invalid();
   if (!slots.length || 2 * Math.max(...slots.map(slot => slot.max_duration_ms || 70_000)) > 140_000) throw invalid();

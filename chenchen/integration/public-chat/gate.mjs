@@ -85,8 +85,11 @@ function receipt(input, reservation, now) {
   // Cloudflare estimate uses FX=10 and official $0.293/$2.253 per million rates;
   // external price and FX caps are validated in the stored reservation policy.
   const p = usage.prompt_tokens, c = usage.completion_tokens;
+  const consistentUsage = (usage.total_tokens === undefined || usage.total_tokens === p + c) &&
+    (usage.input_tokens === undefined || usage.input_tokens === p) &&
+    (usage.output_tokens === undefined || usage.output_tokens === c);
   const inputLimit = reservation.input_bound_tokens ?? selected.max_input_tokens ?? 24_000;
-  const validUsage = input.status === 'COMPLETE' && input.attempt_count === 1 && responseId &&
+  const validUsage = input.status === 'COMPLETE' && input.attempt_count === 1 && responseId && consistentUsage &&
     Number.isInteger(p) && p > 0 && p <= inputLimit && Number.isInteger(c) && c >= 0 && c <= (selected.max_output_tokens || 1024);
   const estimated = validUsage ? (policy.mode === 'cloudflare' ? Math.ceil((p * 293 + c * 2253) / 100) : estimatedMicroCny(usage, selected.prices)) : reservedMicro;
   const settled = validUsage && estimated <= reservedMicro;
