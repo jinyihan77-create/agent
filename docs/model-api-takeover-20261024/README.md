@@ -109,4 +109,4 @@ node chenchen/integration/public-chat/staging-smoke.mjs
 
 代码在独立分支，原 main 和旧提交保留。要回退本轮修复，可在审查分支对修复提交执行 `git revert <修复提交>`，不使用覆盖未提交工作的命令。生产未变更，本轮无需线上回滚。后续 staging 部署前先记录实际 version；出现问题回滚到该记录版本，**Worker 回滚不等于 DO 数据/费用回滚**，不得清空账本。参考 [Cloudflare 回滚说明](https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/)。
 
-本轮证据不含私有团队目录、群聊、真实用户账户资料、密钥或供应商账单。用户可审查本分支后，再决定下一步配置与付费授权。
+本轮证据不含私有团队目录、群聊、真实用户账户资料、密钥或供应商账单。日志中的本机工作区路径替换为 `<WORKSPACE>`，打包表格末尾空白已整理。用户可审查本分支后，再决定下一步配置与付费授权。
