@@ -30,7 +30,8 @@ function externalModel(env, lease, policy, transport = {}) {
       onEvent({type: 'request', request_id, phase: binding.phase, provider: firstSlot.provider, model: firstSlot.model,
         prompt_version: PROMPT_VERSION, messages_hash: sha(messages), request_hash, roles: messages.map(m => m.role),
         message_characters: messages.map(m => m.content.length), max_tokens: firstSlot.max_output_tokens, temperature: firstSlot.temperature,
-        configured_routes: policy.slots.map(slot => ({provider: slot.provider, model: slot.model, max_tokens: slot.max_output_tokens, max_attempts: slot.max_attempts})),
+        configured_routes: policy.slots.map(slot => ({provider: slot.provider, model: slot.model, max_tokens: slot.max_output_tokens, max_attempts: slot.max_attempts,
+          price_currency: slot.prices.currency || 'USD', ...(slot.enable_thinking === false ? {enable_thinking: false} : {})})),
         clipping, at: new Date().toISOString()});
       onCapture({request_id, messages, parameters: {max_tokens: firstSlot.max_output_tokens, temperature: firstSlot.temperature, stream}, binding, messages_hash: sha(messages)});
       const delta = value => {text += value;delta_count++;first_delta_at ??= Date.now();last_delta_at = Date.now();onDelta(value);};

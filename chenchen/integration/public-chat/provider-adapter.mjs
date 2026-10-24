@@ -32,7 +32,7 @@ export function classifyProviderStatus(status) {
 }
 
 export function classifyProviderFailure(status, code) {
-  if (['insufficient_quota', 'insufficient_balance', 'billing_hard_limit_reached'].includes(code)) return 'MODEL_QUOTA_EXHAUSTED';
+  if (['insufficient_quota', 'insufficient_balance', 'billing_hard_limit_reached', 'Arrearage'].includes(code)) return 'MODEL_QUOTA_EXHAUSTED';
   return classifyProviderStatus(status);
 }
 
@@ -56,6 +56,16 @@ export function providerSlot(env, slot) {
   }
   if (provider === 'openai' && (url.origin !== 'https://api.openai.com' || url.pathname.replace(/\/$/, '') !== '/v1')) throw new ProviderError('MODEL_BASE_URL_INVALID');
   if (provider === 'deepseek' && (url.origin !== 'https://api.deepseek.com' || !['', '/', '/v1', '/v1/'].includes(url.pathname))) throw new ProviderError('MODEL_BASE_URL_INVALID');
+  // This acceptance profile is deliberately limited to one Beijing workspace
+  // and one non-thinking model. A generic proxy or trial host is not equivalent.
+  if (provider === 'bailian') {
+    if (url.port || !/^llm-[a-z0-9](?:[a-z0-9-]{0,56}[a-z0-9])?\.cn-beijing\.maas\.aliyuncs\.com$/.test(url.hostname) ||
+        url.pathname.replace(/\/$/, '') !== '/compatible-mode/v1' || env[`LLM_${slot}_REGION`] !== 'cn-beijing') {
+      throw new ProviderError('MODEL_BASE_URL_INVALID');
+    }
+    if (model !== 'qwen3.8-flash') throw new ProviderError('MODEL_NAME_INVALID');
+    if (env[`LLM_${slot}_ENABLE_THINKING`] !== 'false') throw new ProviderError('MODEL_THINKING_POLICY_INVALID');
+  }
   if (env[`LLM_${slot}_PROTOCOL_VERIFIED`] !== 'true') {
     throw new ProviderError('MODEL_PROTOCOL_UNVERIFIED');
   }
@@ -67,8 +77,9 @@ export function providerSlot(env, slot) {
   const temperatureText = env[`LLM_${slot}_TEMPERATURE`] ?? '0';
   if (temperatureText !== 'omit' && (!/^(?:0|1|2)(?:\.\d{1,2})?$/.test(String(temperatureText)) || Number(temperatureText) > 2)) throw new ProviderError('MODEL_SLOT_LIMIT_INVALID');
   const jsonMode = env[`LLM_${slot}_JSON_MODE`] || 'prompt';
-  if (!['prompt', 'json_object'].includes(jsonMode)) throw new ProviderError('MODEL_PROTOCOL_UNVERIFIED');
+  if (!['prompt', 'json_object'].includes(jsonMode) || provider === 'bailian' && jsonMode !== 'json_object') throw new ProviderError('MODEL_PROTOCOL_UNVERIFIED');
   return {slot, provider, protocol, url: new URL(url.href.replace(/\/$/, '') + '/chat/completions'), model, key,
+    ...(provider === 'bailian' ? {enableThinking: false} : {}),
     connectTimeoutMs: integer('CONNECT_TIMEOUT_MS', 8000, 1000, 15000), responseTimeoutMs: integer('RESPONSE_TIMEOUT_MS', 45000, 1000, 60000),
     maxOutputTokens: integer('MAX_OUTPUT_TOKENS', MAX_OUTPUT, 1, MAX_OUTPUT), maxAttempts: integer('MAX_ATTEMPTS', 1, 1, 2),
     maxMessageChars: integer('MAX_MESSAGE_CHARS', MAX_CHARS, 6000, MAX_CHARS), temperature: temperatureText === 'omit' ? null : Number(temperatureText), jsonMode};
@@ -81,7 +92,7 @@ export function providerCooling(env, slot) {
   } catch {return false;}
 }
 
-async function readStream(response, onDelta, signal) {
+async function readStream(response, onDelta, signal, nonThinking = false) {
   if (!response.body) throw new ProviderError('MODEL_STREAM_REQUIRED');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -91,6 +102,7 @@ async function readStream(response, onDelta, signal) {
     let chunk;
     try { chunk = JSON.parse(value); } catch { throw new ProviderError('MODEL_STREAM_INVALID', {partial}); }
     if (chunk.error) throw new ProviderError('MODEL_UPSTREAM_FAILED', {partial});
+    if (nonThinking && chunk.choices?.[0]?.delta?.reasoning_content) throw new ProviderError('MODEL_THINKING_UNEXPECTED', {partial});
     responseId ||= chunk.id || null;
     reportedModel ||= chunk.model || null;
     usage ||= chunk.usage || null;
@@ -151,6 +163,7 @@ export async function callProvider(config, messages, {stream = false, phase, onD
       response = await abortable(fetchImpl(config.url, {method: 'POST', redirect: 'manual', signal: controller.signal,
         headers: {'Authorization': `Bearer ${config.key}`, 'Content-Type': 'application/json', 'X-Client-Request-Id': requestId || crypto.randomUUID()},
         body: JSON.stringify({model: config.model, messages, stream, max_tokens: config.maxOutputTokens || MAX_OUTPUT,
+          ...(config.enableThinking === false ? {enable_thinking: false} : {}),
           ...(config.temperature === null ? {} : {temperature: config.temperature ?? 0}),
           ...(phase === 'plan' && config.jsonMode === 'json_object' ? {response_format: {type: 'json_object'}} : {}),
           ...(stream ? {stream_options: {include_usage: true}} : {})})}), controller.signal);
@@ -166,11 +179,12 @@ export async function callProvider(config, messages, {stream = false, phase, onD
       throw new ProviderError(classifyProviderFailure(response.status, code), {status: response.status});
     }
     let result;
-    if (stream) result = await readStream(response, onDelta, controller.signal);
+    if (stream) result = await readStream(response, onDelta, controller.signal, config.enableThinking === false);
     else {
       let raw;
       try { raw = await abortable(response.json(), controller.signal); } catch { throw new ProviderError(controller.signal.aborted ? 'MODEL_TIMEOUT' : 'MODEL_RESPONSE_INVALID'); }
       const text = raw?.choices?.[0]?.message?.content;
+      if (config.enableThinking === false && raw?.choices?.[0]?.message?.reasoning_content) throw new ProviderError('MODEL_THINKING_UNEXPECTED');
       if (raw?.choices?.[0]?.message?.tool_calls || raw?.choices?.[0]?.finish_reason === 'tool_calls') throw new ProviderError('MODEL_TOOL_CALL_UNSUPPORTED');
       if (typeof text !== 'string' || !text.trim()) throw new ProviderError('MODEL_EMPTY_RESPONSE');
       if (raw.choices[0].finish_reason === 'length') throw new ProviderError('MODEL_OUTPUT_TRUNCATED');

@@ -29,8 +29,34 @@ const integer = (value, max) => {
 export function estimatedMicroCny(usage, prices) {
   const input = usage?.prompt_tokens ?? usage?.input_tokens;
   const output = usage?.completion_tokens ?? usage?.output_tokens;
-  if (!Number.isInteger(input) || input < 0 || !Number.isInteger(output) || output < 0) throw invalid();
+  if (!Number.isSafeInteger(input) || input < 0 || !Number.isSafeInteger(output) || output < 0) throw invalid();
+  if (prices.currency === 'CNY') {
+    if (prices.fx !== 1) throw invalid();
+    // Prices are CNY per million tokens; the result is micro-CNY. Integer
+    // arithmetic avoids rounding 0.1 + 0.2 up to an extra micro-CNY.
+    const scaled = value => {
+      number(String(value));
+      const [whole, fraction = ''] = String(value).split('.');
+      return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0'));
+    };
+    const numerator = BigInt(input) * scaled(prices.input) + BigInt(output) * scaled(prices.output);
+    const micro = Number((numerator + 999_999n) / 1_000_000n);
+    if (!Number.isSafeInteger(micro)) throw invalid();
+    return micro;
+  }
+  if (prices.currency !== undefined && prices.currency !== 'USD') throw invalid();
   return Math.ceil((input * prices.input + output * prices.output) * prices.fx);
+}
+
+function slotPrices(env, slot, provider) {
+  const prefix = `LLM_${slot}_`;
+  const currency = env[prefix + 'PRICE_CURRENCY'] ?? 'USD';
+  if (!['CNY', 'USD'].includes(currency) || provider === 'bailian' && currency !== 'CNY') throw invalid();
+  const other = currency === 'CNY' ? 'USD' : 'CNY';
+  if (env[prefix + `INPUT_${other}_PER_MILLION`] != null || env[prefix + `OUTPUT_${other}_PER_MILLION`] != null) throw invalid();
+  return {currency, input: number(env[prefix + `INPUT_${currency}_PER_MILLION`]),
+    output: number(env[prefix + `OUTPUT_${currency}_PER_MILLION`]),
+    fx: currency === 'CNY' ? 1 : number(env.LLM_CNY_PER_USD_CAP)};
 }
 
 export function gatewayPolicy(env) {
@@ -52,16 +78,13 @@ export function gatewayPolicy(env) {
     }
     const config = providerSlot(env, slot);
     if (env[`LLM_${slot}_BILLING_BOUNDS_VERIFIED`] !== 'true') throw invalid();
-    const prices = {
-      input: number(env[`LLM_${slot}_INPUT_USD_PER_MILLION`]),
-      output: number(env[`LLM_${slot}_OUTPUT_USD_PER_MILLION`]),
-      fx: number(env.LLM_CNY_PER_USD_CAP),
-    };
+    const prices = slotPrices(env, slot, config.provider);
     const max_input_tokens = inputTokenBound(config.maxMessageChars);
     const max_micro_cny = estimatedMicroCny({prompt_tokens: max_input_tokens, completion_tokens: config.maxOutputTokens}, prices);
     slots.push({slot, provider: config.provider, model: config.model, prices, max_micro_cny, max_output_tokens: config.maxOutputTokens,
       max_attempts: hybrid ? 1 : config.maxAttempts, max_duration_ms: config.connectTimeoutMs + config.responseTimeoutMs,
       max_message_chars: config.maxMessageChars, max_input_tokens, temperature: config.temperature, json_mode: config.jsonMode,
+      ...(config.enableThinking === false ? {enable_thinking: false} : {}),
       daily_max_calls: integer(env[`LLM_${slot}_DAILY_MAX_CALLS`], 1000), daily_cap_micro_cny: integer(env[`LLM_${slot}_DAILY_CAP_CENTS`], 1000) * 10_000});
   }
   if (new Set(slots.map(slot => `${slot.provider}:${slot.model}`)).size !== slots.length) throw invalid();

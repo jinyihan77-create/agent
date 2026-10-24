@@ -105,7 +105,8 @@ function receipt(input, reservation, now) {
     ...(attempts ? {attempts} : {}),
     reserved_cents: reservedMicro / 10_000, reserved_micro_cny: reservedMicro, charged_micro_cny: settled ? estimated : reservedMicro,
     usage_estimate_verified: Boolean(settled),
-    cost_basis: settled ? (policy.mode === 'cloudflare' ? 'USAGE_ESTIMATE_FX_10_NOT_INVOICE' : 'USAGE_ESTIMATE_CONFIGURED_FX_NOT_INVOICE') : 'CONSERVATIVE_RESERVATION_NOT_INVOICE',
+    cost_basis: settled ? (policy.mode === 'cloudflare' ? 'USAGE_ESTIMATE_FX_10_NOT_INVOICE' :
+      selected.prices.currency === 'CNY' ? 'USAGE_ESTIMATE_CNY_NOT_INVOICE' : 'USAGE_ESTIMATE_CONFIGURED_FX_NOT_INVOICE') : 'CONSERVATIVE_RESERVATION_NOT_INVOICE',
   };
 }
 
