@@ -128,3 +128,11 @@ npm run demo:account-hub
 ## 部署说明
 
 部署前先执行 `node integration/public-chat/build.mjs`，它会把 `app.html`、`review.js` 和 `review.css`生成到 `integration/public-chat/public/`，再由 Wrangler 发布。当前工作只完成代码和本地验证，没有直接替换线上生产版本，也没有接入真实银行或付费模型。
+## 公网演示
+
+当前独立演示地址：
+
+https://personal-ai-fund-chat-account-hub-preview.realchenchenluo.workers.dev
+
+这是独立的 preview Worker，不覆盖原有正式地址。页面里的账户、房租、学费、基金和信用卡数据均为合成数据，模型回答使用测试替身；不会连接真实银行、不会产生真实资金动作。打开后点击“试用合成数据”，再输入“我想再投入8000元买基金，但下个月还要交房租，会不会影响生活安排？”即可看到资金冲突检查。
+

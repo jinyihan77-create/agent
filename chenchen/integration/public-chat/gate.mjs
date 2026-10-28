@@ -116,7 +116,7 @@ export class ChatGate {
 
   async admit(body) {
     const ip = hash(body.ip_hash, 'ip_hash');
-    if (!['session', 'create', 'read', 'mutation', 'stream'].includes(body.kind)) throw error('INVALID_REQUEST', '请求类型无效。');
+    if (!['session', 'create', 'read', 'mutation', 'stream', 'account'].includes(body.kind)) throw error('INVALID_REQUEST', '请求类型无效。');
     const window = Math.floor(this.now() / MINUTE);
     // This separate fixed-minute ledger never inspects or changes the AI ledger.
     // At most 1200 IP keys exist per window, including at minute rollover. The
