@@ -10,7 +10,7 @@ for(const [name,target] of [['app.html','index.html'],['review.css','health.css'
  if(/127\.0\.0\.1|localhost|CHAT_BRIDGE_KEY|Bearer /.test(source))throw Error('PUBLIC_ASSET_DEPENDENCY_OR_SECRET');
  writeFileSync(path.join(here,'public',target),source);
 }
-const files=['worker.mjs','session.mjs','model.mjs','llm-gateway.mjs','gateway-policy.mjs','provider-adapter.mjs','cloud-transport.mjs','risk.mjs','gate.mjs','shared.mjs','trace.mjs','confirmation.mjs','review-tools.mjs','app.html','review.html','review.js','review.css','wrangler.jsonc','risk-wrangler.jsonc','staging.jsonc','staging-risk.jsonc','staging-smoke.mjs','staging-model-smoke.mjs','../../core/holdings-conversation.js','../../tools/holdings-readonly.js','public/index.html','public/health.js','public/health.css'];
+const files=['worker.mjs','session.mjs','model.mjs','llm-gateway.mjs','gateway-policy.mjs','provider-adapter.mjs','cloud-transport.mjs','risk.mjs','gate.mjs','shared.mjs','trace.mjs','confirmation.mjs','review-tools.mjs','../../integrations/account-hub.js','app.html','review.html','review.js','review.css','wrangler.jsonc','risk-wrangler.jsonc','staging.jsonc','staging-risk.jsonc','staging-smoke.mjs','staging-model-smoke.mjs','../../core/holdings-conversation.js','../../tools/holdings-readonly.js','public/index.html','public/health.js','public/health.css'];
 const hashes=Object.fromEntries(files.map(f=>[f,createHash('sha256').update(readFileSync(path.join(here,f))).digest('hex')]));
 writeFileSync(path.join(here,'build-manifest.json'),JSON.stringify({built_at:new Date().toISOString(),files:hashes},null,2)+'\n');
 console.log('Built integrated chat and holdings review assets; no local runtime dependencies; source manifest saved.');

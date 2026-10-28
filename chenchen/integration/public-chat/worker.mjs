@@ -8,6 +8,7 @@ import {createModelGateway} from './llm-gateway.mjs';
 import {ensureTrace,mark,remember,modelEvent,finishTrace,boundedHistory} from './trace.mjs';
 import {validateBaselineConfirmation} from './confirmation.mjs';
 import {normalizeReview,buildReview,createSnapshot,compareSnapshots,compareCurrentReview} from './review-tools.mjs';
+import accountHub from '../../integrations/account-hub.js';
 export {ChatGate} from './gate.mjs';
 const safeCode=value=>typeof value==='string'&&/^[A-Z][A-Z0-9_]{0,80}$/.test(value)?value:'SERVICE_UNAVAILABLE';
 const clone=x=>structuredClone(x),fail=(code,status=422)=>{throw Object.assign(Error(code),{code,status});};
@@ -17,6 +18,7 @@ function errorResponse(error){const code=safeCode(error.code);return json({error
 async function bodyOf(request){if(!/^application\/json(?:;|$)/i.test(request.headers.get('Content-Type')||''))fail('JSON_REQUIRED',415);const reader=request.body?.getReader();if(!reader)fail('BODY_REQUIRED');let size=0,chunks=[];while(true){const p=await reader.read();if(p.done)break;size+=p.value.length;if(size>16000){await reader.cancel();fail('BODY_TOO_LARGE',413);}chunks.push(p.value);}try{return JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{fail('INVALID_JSON',400);}}
 const chatRoute=/^\/api\/local\/chats(?:\/([\w-]{1,100})(?:\/(turns|confirm|review)(?:\/([\w-]{1,100})(?:\/(events|stop|trace))?)?)?)?$/;
 const snapshotRoute=/^\/api\/local\/snapshots(?:\/([\w-]{1,100})(?:\/(restore|update|delete|compare))?)?$/;
+const accountRoute=/^\/api\/local\/accounts(?:\/(demo|plan|[A-Za-z0-9_-]{1,100}))?$/;
 export default {async fetch(request,env){try{
  const url=new URL(request.url);if(url.origin!==env.PUBLIC_ORIGIN)fail('WRONG_HOST',421);
  if(url.pathname==='/api/admin/evaluate'&&request.method==='POST'){
@@ -35,16 +37,16 @@ export default {async fetch(request,env){try{
  if(url.pathname==='/health'&&request.method==='GET')return json({status:'ok',service:'personal-ai-fund-chat',execution_allowed:false});
  if(!url.pathname.startsWith('/api/')){if(!['/','/health.js','/health.css'].includes(url.pathname)||!['GET','HEAD'].includes(request.method))fail('NOT_FOUND',404);const served=await env.ASSETS.fetch(request),response=new Response(served.body,served);for(const[k,v]of Object.entries(headers))response.headers.set(k,v);response.headers.set('X-App-Release',env.RELEASE_ID||'unrecorded');return response;}
  if(request.headers.get('Sec-Fetch-Site')==='cross-site'||url.search)fail('CROSS_SITE_DENIED',403);
- const sessionRoute=url.pathname==='/api/session'&&request.method==='GET',matched=chatRoute.exec(url.pathname),snapshotMatched=snapshotRoute.exec(url.pathname);
- if(!sessionRoute&&(!(matched||snapshotMatched)||!['GET','POST'].includes(request.method)))fail('NOT_FOUND',404);
+ const sessionRoute=url.pathname==='/api/session'&&request.method==='GET',matched=chatRoute.exec(url.pathname),snapshotMatched=snapshotRoute.exec(url.pathname),accountMatched=accountRoute.exec(url.pathname);
+ if(!sessionRoute&&(!(matched||snapshotMatched||accountMatched)||!['GET','POST'].includes(request.method)))fail('NOT_FOUND',404);
  const ip_hash=sign(env.SESSION_SECRET,'ip:'+(request.headers.get('CF-Connecting-IP')||'unknown'));
- const kind=sessionRoute?'session':request.method==='GET'?(url.pathname.endsWith('/events')?'stream':'read'):matched&&!matched[1]?'create':'mutation';
+ const kind=sessionRoute?'session':accountMatched?'account':request.method==='GET'?(url.pathname.endsWith('/events')?'stream':'read'):matched&&!matched[1]?'create':'mutation';
  await gate(env,'admit',{ip_hash,kind});
  const session=sessionFor(request,env.SESSION_SECRET);
  if(url.pathname==='/api/session'&&request.method==='GET')return json({csrf:session.csrf,workspace:'private-browser-records',expires_in_days:30,execution_allowed:false},200,{'Set-Cookie':session.cookie});
  if(session.fresh)fail('SESSION_REQUIRED',401);
  if(request.method==='POST'&&(request.headers.get('Origin')!==env.PUBLIC_ORIGIN||!equal(request.headers.get('X-CSRF-Token'),session.csrf)))fail('SESSION_OR_CSRF_REQUIRED',403);
- if(!(chatRoute.test(url.pathname)||snapshotRoute.test(url.pathname))||!['GET','POST'].includes(request.method))fail('NOT_FOUND',404);
+ if(!(chatRoute.test(url.pathname)||snapshotRoute.test(url.pathname)||accountRoute.test(url.pathname))||!['GET','POST'].includes(request.method))fail('NOT_FOUND',404);
  const body=request.method==='POST'?await bodyOf(request):undefined,owner=sha(session.id);
  const response=await env.CHAT_SESSIONS.get(env.CHAT_SESSIONS.idFromName(owner)).fetch(new Request('https://session'+url.pathname,{method:request.method,headers:{'Content-Type':'application/json','X-Verified-Owner':owner,'X-Verified-IP':ip_hash},...(body===undefined?{}:{body:JSON.stringify(body)})}));
  const result=new Response(response.body,response);for(const[k,v]of Object.entries(headers))result.headers.set(k,v);return result;
@@ -83,19 +85,20 @@ export class ChatSession{
  }
 
  async run(c,t,control){
-  const signal=control.signal,model=createModelGateway(this.env,t.lease),trace=ensureTrace(t,c,this.env);
+  const signal=control.signal,model=createModelGateway(this.env,t.lease),trace=ensureTrace(t,c,this.env);let accountView;
   const audit={onEvent:event=>modelEvent(t.trace,event),onCapture:request=>{if(this.env.QUALITY_CAPTURE_CONVERSATION_ID===c.id)(t.captured_requests??=[]).push({request_id:request.request_id,messages_hash:request.messages_hash,binding:request.binding,parameters:request.parameters,message_count:request.messages.length});}};
   try{
+   accountView=accountHub.publicHub(await this.loadAccountHub());
    signal.throwIfAborted();
    if(!t.plan){
     t.trace.model_steps.plan={status:'REQUIRED_NOT_CALLED',used:false};mark(t.trace,'model','REQUIRED_NOT_CALLED');await this.stage(c,t,'正在理解你的问题');
     const history=boundedHistory(c.turns,t.id);remember(t.trace,c.state,history);t.history=history;
-    const planned=await model.plan({message:t.user,state:{actual:c.state.actual,version:c.state.version,scenario:c.state.scenario?{transfer:c.state.scenario.transfer,base_version:c.state.scenario.base_version}:null,previous_actual:c.state.previous_actual,metadata:c.state.metadata,baseline_snapshot_id:c.state.baseline_snapshot_id,comparison:c.state.comparison?{before:c.state.comparison.before,after:c.state.comparison.after,stale:this.publicComparison(c.state.comparison,c).stale}:null},history},{...audit,signal,binding:{trace_id:t.trace_id,conversation_id:c.id,turn_id:t.id,phase:'plan',input_hash:sha(c.state)}});
+    const planned=await model.plan({message:t.user,state:{actual:c.state.actual,version:c.state.version,scenario:c.state.scenario?{transfer:c.state.scenario.transfer,base_version:c.state.scenario.base_version}:null,previous_actual:c.state.previous_actual,metadata:c.state.metadata,baseline_snapshot_id:c.state.baseline_snapshot_id,comparison:c.state.comparison?{before:c.state.comparison.before,after:c.state.comparison.after,stale:this.publicComparison(c.state.comparison,c).stale}:null,account_hub:accountView},history},{...audit,signal,binding:{trace_id:t.trace_id,conversation_id:c.id,turn_id:t.id,phase:'plan',input_hash:sha(c.state)}});
     signal.throwIfAborted();t.plan=preflightReviewPlan(t.user,planned.value,c.state);t.receipts.push(planned.receipt);const planCall=t.trace.model_calls.find(x=>x.request_id===planned.receipt.request_id);if(planCall)planCall.used=true;t.trace.model_steps.plan.used=true;await this.publish(c,t);
    }
    if(!t.prepared){
     t.plan=preflightReviewPlan(t.user,t.plan,c.state);t.trace.task=t.plan.operation;t.trace.path='APPLICATION_ORCHESTRATED';t.trace.decision_summary='Validated planner operation: '+t.plan.operation;mark(t.trace,'core','SUCCEEDED',{used:true});const p=applyPlan(c.state,t.plan);
-    const context={history:t.history||boundedHistory(c.turns,t.id),operation:t.plan.operation,focus:t.plan.focus||'actual',question:t.user,actual:c.state.actual,previous_actual:c.state.previous_actual,previous_tool:c.state.previous_tool?.output||null,actual_tool:c.state.actual_tool?.output||null,scenario:c.state.scenario,clarifying_question:t.plan.question,review:c.state.review||null,comparison:this.publicComparison(c.state.comparison,c),execution_allowed:false};
+    const context={history:t.history||boundedHistory(c.turns,t.id),operation:t.plan.operation,focus:t.plan.focus||'actual',question:t.user,actual:c.state.actual,previous_actual:c.state.previous_actual,previous_tool:c.state.previous_tool?.output||null,actual_tool:c.state.actual_tool?.output||null,scenario:c.state.scenario,clarifying_question:t.plan.question,review:c.state.review||null,comparison:this.publicComparison(c.state.comparison,c),account_hub:accountView,execution_allowed:false};
     let calculation;
     if(p.rows){
      await this.stage(c,t,p.simulation?'正在计算模拟方案':'正在计算持仓比例');
@@ -197,6 +200,33 @@ export class ChatSession{
   }
   fail('METHOD_NOT_ALLOWED',405);
  }
+ async handleAccounts(request,match){
+  const action=match[1]||null;
+  if(request.method==='GET'){
+   if(action)fail('METHOD_NOT_ALLOWED',405);
+   return json(accountHub.publicHub(await this.loadAccountHub()));
+  }
+  if(request.method!=='POST')fail('METHOD_NOT_ALLOWED',405);
+  const body=await request.json();
+  if(action==='plan'){
+   const hub=await this.loadAccountHub();
+   return json({plan:accountHub.routeScenario(body?.question,hub),hub:accountHub.publicHub(hub)});
+  }
+  let result,status=200;
+  if(action==='demo'){
+   result=accountHub.seedDemo(await this.loadAccountHub(),{idempotencyKey:body?.idempotency_key||'account-hub-demo-v1',requestId:body?.request_id||'demo-seed-v1'});
+   status=result.replayed?200:201;
+  }else{
+   const input={...(body?.account&&typeof body.account==='object'?body.account:body)};
+   if(action)input.account_id=action;
+   result=accountHub.upsert(await this.loadAccountHub(),input,{requestId:body?.request_id||null,idempotencyKey:body?.idempotency_key,now:new Date().toISOString()});
+   status=result.replayed?200:201;
+  }
+  await this.saveAccountHub(result.hub);
+  return json({account:result.account||null,notice:result.notice||null,replayed:result.replayed,hub:accountHub.publicHub(result.hub)},status);
+ }
+ async loadAccountHub(){return accountHub.ensureHub(await this.storage.get('account-hub'));}
+ async saveAccountHub(hub){try{await this.storage.put('account-hub',hub);}catch{fail('STORAGE_UNAVAILABLE',503);}}
  async confirm(c,request){
   if(this.live.size)fail('TURN_IN_PROGRESS',409);
   const next=clone(c),s=next.state.scenario;
@@ -210,7 +240,7 @@ export class ChatSession{
   next.turns.push(t);await this.save(next,t);this.cache.set(c.id,next);
   return {conversation:this.publicConversation(next),execution_allowed:false};
  }
- async handle(request){await this.ready;const owner=request.headers.get('X-Verified-Owner');if(!/^[a-f0-9]{64}$/.test(owner||''))fail('IDENTITY_REQUIRED',403);if(this.owner&&this.owner!==owner)fail('OWNER_MISMATCH',403);if(!this.owner){this.owner=owner;await this.storage.put('owner',owner);}const path=new URL(request.url).pathname,snapshotMatch=snapshotRoute.exec(path);if(snapshotMatch)return this.handleSnapshots(request,snapshotMatch);const match=chatRoute.exec(path);if(!match)fail('NOT_FOUND',404);const[,cid,action,tid,verb]=match;
+ async handle(request){await this.ready;const owner=request.headers.get('X-Verified-Owner');if(!/^[a-f0-9]{64}$/.test(owner||''))fail('IDENTITY_REQUIRED',403);if(this.owner&&this.owner!==owner)fail('OWNER_MISMATCH',403);if(!this.owner){this.owner=owner;await this.storage.put('owner',owner);}const path=new URL(request.url).pathname,accountMatch=accountRoute.exec(path);if(accountMatch)return this.handleAccounts(request,accountMatch);const snapshotMatch=snapshotRoute.exec(path);if(snapshotMatch)return this.handleSnapshots(request,snapshotMatch);const match=chatRoute.exec(path);if(!match)fail('NOT_FOUND',404);const[,cid,action,tid,verb]=match;
  if(!cid){if(request.method==='GET')return json({scope:'THIS_BROWSER_RECORDS',conversations:this.index.map(c=>({...c,active:this.live.has(c.id)})),execution_allowed:false});if(request.method!=='POST')fail('METHOD_NOT_ALLOWED',405);if(this.index.length>=40)fail('CONVERSATION_LIMIT',429);const c={id:'chat-'+randomUUID(),title:'新对话',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),state:{actual:[],previous_actual:[],actual_tool:null,previous_tool:null,version:0,scenario:null},turns:[]};this.cache.set(c.id,c);await this.save(c);return json(this.publicConversation(c),201);}
  const c=await this.load(cid);if(!action&&request.method==='GET')return json(this.publicConversation(c));if(action==='turns'&&!tid&&request.method==='POST')return json(await this.start(c,await request.json(),request.headers.get('X-Verified-IP')),202);if(action==='review'&&request.method==='POST')return json(await this.editReview(c,await request.json()));if(action==='confirm'&&request.method==='POST')return json(await this.confirm(c,await request.json()));const t=c.turns.find(t=>t.id===tid);if(!t)fail('TURN_NOT_FOUND',404);
  if(verb==='trace'&&request.method==='GET')return json({trace:t.trace||null,captured_requests:t.captured_requests||[],note:t.trace?'SERVER_GENERATED_OBSERVATIONS':'LEGACY_TURN_WITHOUT_TRACE',execution_allowed:false});if(verb==='events'&&request.method==='GET')return this.stream(c,t);if(verb==='stop'&&request.method==='POST'){const active=this.live.get(c.id);if(active?.turn_id===tid){active.controller.abort();t.status='STOPPED';t.phase='';t.error={code:'USER_STOPPED',message:'已停止生成。已完成计算保留，没有执行交易。'};await this.publish(c,t);}return json(this.publicTurn(t,c));}fail('METHOD_NOT_ALLOWED',405);
